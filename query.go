@@ -109,6 +109,7 @@ type QueryMatches struct {
 	_inner *C.TSQueryCursor
 	query  *Query
 	text   []byte
+	m      C.TSQueryMatch // re-use to avoid runtime.newobject
 }
 
 // A sequence of [QueryCapture]s associated with a given [QueryCursor].
@@ -879,7 +880,7 @@ func (qm *QueryMatch) Id() uint {
 	return qm.id
 }
 
-func newQueryMatch(m *C.TSQueryMatch, cursor *C.TSQueryCursor) QueryMatch {
+func newQueryMatch(m C.TSQueryMatch, cursor *C.TSQueryCursor) QueryMatch {
 	var captures []QueryCapture
 	if m.capture_count > 0 {
 		cCaptures := unsafe.Slice(m.captures, m.capture_count)
@@ -1012,20 +1013,16 @@ func NewQueryProperty(key string, value *string, captureId *uint) QueryProperty 
 // If you need to keep the data of a prior match without it being overwritten, you should copy what you need before calling [QueryMatches.Next] again.
 //
 // If there are no more matches, it will return nil.
-func (qm *QueryMatches) Next() *QueryMatch {
+func (qm *QueryMatches) Next() (QueryMatch, bool) {
 	for {
-		m := (*C.TSQueryMatch)(C.malloc(C.sizeof_TSQueryMatch))
-		defer C.free(unsafe.Pointer(m))
-		if C.ts_query_cursor_next_match(qm._inner, m) {
-			result := newQueryMatch(m, qm._inner)
-			if result.satisfiesTextPredicate(
-				qm.query,
-				qm.text,
-			) {
-				return &result
-			}
-		} else {
-			return nil
+		qm.m = C.TSQueryMatch{}
+		if !C.ts_query_cursor_next_match(qm._inner, &qm.m) {
+			return QueryMatch{}, false
+		}
+		result := newQueryMatch(qm.m, qm._inner)
+		textPredicates := len(qm.query.TextPredicates[result.PatternIndex])
+		if textPredicates == 0 || result.satisfiesTextPredicate(qm.query, qm.text) {
+			return result, true
 		}
 	}
 }
@@ -1041,7 +1038,7 @@ func (qc *QueryCaptures) Next() (*QueryMatch, uint) {
 		m := (*C.TSQueryMatch)(C.malloc(C.sizeof_TSQueryMatch))
 		var captureIndex C.uint32_t
 		if C.ts_query_cursor_next_capture(qc._inner, m, &captureIndex) {
-			result := newQueryMatch(m, qc._inner)
+			result := newQueryMatch(*m, qc._inner)
 			if result.satisfiesTextPredicate(
 				qc.query,
 				qc.text,

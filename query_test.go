@@ -97,7 +97,7 @@ func ExampleQueryCursor_Matches() {
 
 	matches := qc.Matches(query, tree.RootNode(), sourceCode)
 
-	for match := matches.Next(); match != nil; match = matches.Next() {
+	for match, ok := matches.Next(); ok; match, ok = matches.Next() {
 		for _, capture := range match.Captures {
 			fmt.Printf(
 				"Match %d, Capture %d (%s): %s\n",
@@ -2509,7 +2509,7 @@ func TestQueryMatchesWithWildcardAtRootIntersectingByteRange(t *testing.T) {
 	offset := uint(strings.Index(source, "A:")) + 2
 	matches := cursor.SetByteRange(offset, offset).Matches(query, tree.RootNode(), []byte(source))
 	kinds := make([]string, 0)
-	for match := matches.Next(); match != nil; match = matches.Next() {
+	for match, ok := matches.Next(); ok; match, ok = matches.Next() {
 		kinds = append(kinds, match.Captures[0].Node.Kind())
 	}
 	assert.Equal(t, []string{"class_definition"}, kinds)
@@ -2518,7 +2518,7 @@ func TestQueryMatchesWithWildcardAtRootIntersectingByteRange(t *testing.T) {
 	offset = uint(strings.Index(source, "b():")) + 4
 	matches = cursor.SetByteRange(offset, offset).Matches(query, tree.RootNode(), []byte(source))
 	kinds = make([]string, 0)
-	for match := matches.Next(); match != nil; match = matches.Next() {
+	for match, ok := matches.Next(); ok; match, ok = matches.Next() {
 		kinds = append(kinds, match.Captures[0].Node.Kind())
 	}
 	assert.Equal(t, []string{"class_definition", "function_definition"}, kinds)
@@ -2527,7 +2527,7 @@ func TestQueryMatchesWithWildcardAtRootIntersectingByteRange(t *testing.T) {
 	offset = uint(strings.Index(source, "c:")) + 2
 	matches = cursor.SetByteRange(offset, offset).Matches(query, tree.RootNode(), []byte(source))
 	kinds = make([]string, 0)
-	for match := matches.Next(); match != nil; match = matches.Next() {
+	for match, ok := matches.Next(); ok; match, ok = matches.Next() {
 		kinds = append(kinds, match.Captures[0].Node.Kind())
 	}
 	assert.Equal(t, []string{"class_definition", "function_definition", "if_statement"}, kinds)
@@ -2874,7 +2874,7 @@ func TestQueryMatchesWithCapturedWildcardAtRoot(t *testing.T) {
 	matchCaptureNamesAndRows := make([][]captureNamesAndRows, 0)
 
 	matches := cursor.Matches(query, tree.RootNode(), []byte(source))
-	for match := matches.Next(); match != nil; match = matches.Next() {
+	for match, ok := matches.Next(); ok; match, ok = matches.Next() {
 		captures := make([]captureNamesAndRows, 0)
 		for _, capture := range match.Captures {
 			captures = append(captures, captureNamesAndRows{
@@ -3873,12 +3873,29 @@ func TestQueryCapturesAndMatchesIteratorsAreFused(t *testing.T) {
 
 	matches := cursor.Matches(query, tree.RootNode(), []byte(source))
 
-	assert.EqualValues(t, 0, matches.Next().Captures[0].Index)
-	assert.EqualValues(t, 0, matches.Next().Captures[0].Index)
-	assert.EqualValues(t, 0, matches.Next().Captures[0].Index)
-	assert.Nil(t, matches.Next())
-	assert.Nil(t, matches.Next())
-	assert.Nil(t, matches.Next())
+	next, ok := matches.Next()
+	assert.True(t, ok)
+	assert.EqualValues(t, 0, next.Captures[0].Index)
+
+	next, ok = matches.Next()
+	assert.True(t, ok)
+	assert.EqualValues(t, 0, next.Captures[0].Index)
+
+	next, ok = matches.Next()
+	assert.True(t, ok)
+	assert.EqualValues(t, 0, next.Captures[0].Index)
+
+	next, ok = matches.Next()
+	assert.Zero(t, next)
+	assert.False(t, ok)
+
+	next, ok = matches.Next()
+	assert.False(t, ok)
+	assert.Zero(t, next)
+
+	next, ok = matches.Next()
+	assert.False(t, ok)
+	assert.Zero(t, next)
 }
 
 func TestQueryStartEndByteForPattern(t *testing.T) {
@@ -4804,14 +4821,16 @@ func TestConsecutiveZeroOrModifiers(t *testing.T) {
 		cursor := NewQueryCursor()
 		defer cursor.Close()
 		matches := cursor.Matches(query, zeroTree.RootNode(), []byte(zeroSource))
-		assert.NotNil(t, matches.Next())
+		next, ok := matches.Next()
+		assert.True(t, ok)
+		assert.NotNil(t, next)
 
 		matches = cursor.Matches(query, threeTree.RootNode(), []byte(threeSource))
 
 		len3 := false
 		len1 := false
 
-		for match := matches.Next(); match != nil; match = matches.Next() {
+		for match, ok := matches.Next(); ok; match, ok = matches.Next() {
 			if len(match.Captures) == 3 {
 				len3 = true
 			}
@@ -4881,7 +4900,9 @@ func TestQueryMaxStartDepthMore(t *testing.T) {
 	defer query.Close()
 
 	matches := cursor.Matches(query, tree.RootNode(), []byte(source))
-	node := matches.Next().Captures[0].Node
+	next, ok := matches.Next()
+	assert.True(t, ok)
+	node := next.Captures[0].Node
 	assert.Equal(t, "compound_statement", node.Kind())
 
 	for _, row := range rows {
@@ -4985,14 +5006,14 @@ func TestQueryExecutionWithTimeout(t *testing.T) {
 		}},
 	)
 	count := 0
-	for matches.Next() != nil {
+	for _, ok := matches.Next(); ok; _, ok = matches.Next() {
 		count++
 	}
 	assert.True(t, count < 1000)
 
 	matches = cursor.Matches(query, tree.RootNode(), []byte(sourceCode))
 	count = 0
-	for matches.Next() != nil {
+	for _, ok := matches.Next(); ok; _, ok = matches.Next() {
 		count++
 	}
 	assert.Equal(t, 1000, count)
@@ -5237,7 +5258,7 @@ func collectMatches(
 ) []formattedMatch {
 	result := make([]formattedMatch, 0)
 
-	for match := matches.Next(); match != nil; match = matches.Next() {
+	for match, ok := matches.Next(); ok; match, ok = matches.Next() {
 		result = append(result, fmtMatch(match.PatternIndex, formatCaptures(match.Captures, query, source)...))
 	}
 
