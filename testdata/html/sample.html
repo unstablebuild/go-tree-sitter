@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Query directives &amp; sample</title>
+    <link rel="stylesheet" href="/assets/site.css" />
+    <script src="https://cdn.example.com/app.js" defer></script>
+    <style>
+      a { color: rebeccapurple; }
+    </style>
+  </head>
+  <body class="page" id="top">
+    <!-- Links carry a url property; class and id must not. -->
+    <a href="https://rune.build" class="brand">Rune</a>
+    <a href='mailto:hi@example.com'>Mail</a>
+    <img src="/logo.png" alt="Logo" width="32" />
+    <a href=bare-unquoted.html>Unquoted</a>
+    <script>
+      const url = "not/an/attribute.js";
+    </script>
+  </body>
+</html>

@@ -83,6 +83,11 @@ type QueryProperty struct {
 	Key       string
 	Value     *string
 	CaptureId *uint
+	// ValueCaptureId is set when the property value is itself a
+	// capture, as in `(#set! @link.label url @link.url)`. The value is
+	// then the text of that capture in the match, which the pattern
+	// cannot know statically. Mutually exclusive with Value.
+	ValueCaptureId *uint
 }
 
 type QueryPredicateArg struct {
@@ -472,16 +477,21 @@ func fromRawParts(ptr *C.TSQuery, source string) (*Query, *QueryError) {
 			case "set!":
 				property, err := parseProperty(uint(row), operatorName, captureNames, stringValues, p[1:])
 				if err != nil {
-					C.ts_query_delete(ptr)
-					return nil, err
+					// Diverges from upstream, which fails the query.
+					// Community query files ship directives no
+					// implementation can interpret, such as a `#set!`
+					// with no key at all. Refusing the query costs the
+					// caller every pattern in the file, so drop the
+					// property instead.
+					break
 				}
 				propertySettings = append(propertySettings, property)
 
 			case "is?", "is-not?":
 				property, err := parseProperty(uint(row), operatorName, captureNames, stringValues, p[1:])
 				if err != nil {
-					C.ts_query_delete(ptr)
-					return nil, err
+					// See the `set!` case above.
+					break
 				}
 				propertyPredicates = append(propertyPredicates, PropertyPredicate{
 					Property: property,
@@ -666,18 +676,27 @@ func parseProperty(row uint, functionName string, captureNames []string, stringV
 	var captureId *uint
 	var key *string
 	var value *string
+	var valueCaptureId *uint
 
 	for _, arg := range args {
 		if arg._type == C.TSQueryPredicateStepTypeCapture {
-			if captureId != nil {
-				return QueryProperty{}, predicateError(row, fmt.Sprintf("Invalid arguments to %s predicate. Unexpected second capture name @%s", functionName, captureNames[arg.value_id]))
+			// A capture before the key names the node the property is
+			// attached to; one after it supplies the value, which is
+			// the text of that capture in the match.
+			switch {
+			case key == nil && captureId == nil:
+				captureId = new(uint)
+				*captureId = uint(arg.value_id)
+			case key != nil && valueCaptureId == nil && value == nil:
+				valueCaptureId = new(uint)
+				*valueCaptureId = uint(arg.value_id)
+			default:
+				return QueryProperty{}, predicateError(row, fmt.Sprintf("Invalid arguments to %s predicate. Unexpected capture name @%s", functionName, captureNames[arg.value_id]))
 			}
-			captureId = new(uint)
-			*captureId = uint(arg.value_id)
 		} else if key == nil {
 			k := stringValues[arg.value_id]
 			key = &k
-		} else if value == nil {
+		} else if value == nil && valueCaptureId == nil {
 			v := stringValues[arg.value_id]
 			value = &v
 		} else {
@@ -690,9 +709,10 @@ func parseProperty(row uint, functionName string, captureNames []string, stringV
 	}
 
 	return QueryProperty{
-		Key:       *key,
-		Value:     value,
-		CaptureId: captureId,
+		Key:            *key,
+		Value:          value,
+		CaptureId:      captureId,
+		ValueCaptureId: valueCaptureId,
 	}, nil
 }
 

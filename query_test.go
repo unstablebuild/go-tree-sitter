@@ -2,12 +2,15 @@ package tree_sitter_test
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	. "github.com/tree-sitter/go-tree-sitter"
 	tree_sitter_go "github.com/tree-sitter/tree-sitter-go/bindings/go"
 )
@@ -532,6 +535,230 @@ func TestQueryErrorsOnInvalidPredicates(t *testing.T) {
 			Message: "ok",
 		},
 	)
+}
+
+// A property value may be a capture rather than a literal, as in
+// nvim-treesitter's `(#set! @markup.link.label url @markup.link.url)`: the value
+// is the matched text, which the pattern cannot know statically.
+func TestQueryPropertiesWithCaptureValues(t *testing.T) {
+	language := getLanguage("javascript")
+	uintptr := func(i uint) *uint { return &i }
+
+	query, qerr := NewQuery(
+		language,
+		`
+		((member_expression
+			object: (identifier) @obj
+			property: (property_identifier) @prop)
+			(#set! @prop url @obj))
+		`,
+	)
+	require.Nil(t, qerr)
+	defer query.Close()
+
+	assert.Equal(
+		t,
+		[]QueryProperty{{Key: "url", CaptureId: uintptr(1), ValueCaptureId: uintptr(0)}},
+		query.PropertySettings(0),
+	)
+
+	resolved, matches := resolveProperties(t, language, query, []byte("const a = window.b"))
+	assert.Equal(t, []resolvedProperty{{Key: "url", Target: "prop", Value: "window"}}, resolved)
+	assert.Equal(t, 1, matches)
+}
+
+// The html highlights query every Rune user loads carries
+// `(#set! @string.special.url url @string.special.url)`, which nvim-treesitter
+// uses to mark link targets. Rejecting it discarded the whole file and left the
+// language with no parser at all, so the shipped query is exercised verbatim.
+func TestQueryRealHTMLHighlightsResolvesLinkTargets(t *testing.T) {
+	language := getLanguage("html")
+	querySource, err := os.ReadFile(filepath.Join("testdata", "html", "highlights.scm"))
+	require.NoError(t, err)
+
+	query, qerr := NewQuery(language, string(querySource))
+	require.Nil(t, qerr)
+	defer query.Close()
+
+	source, err := os.ReadFile(filepath.Join("testdata", "html", "sample.html"))
+	require.NoError(t, err)
+
+	resolved, _ := resolveProperties(t, language, query, source)
+	assert.Equal(
+		t,
+		[]resolvedProperty{
+			{Key: "url", Target: "string.special.url", Value: "/assets/site.css"},
+			{Key: "url", Target: "string.special.url", Value: "https://cdn.example.com/app.js"},
+			{Key: "url", Target: "string.special.url", Value: "https://rune.build"},
+			{Key: "url", Target: "string.special.url", Value: "mailto:hi@example.com"},
+			{Key: "url", Target: "string.special.url", Value: "/logo.png"},
+		},
+		resolved,
+		"every quoted href and src in testdata/html/sample.html, in document order, "+
+			"and nothing else: class, id, alt, width, rel, charset and lang carry no url, "+
+			"and the unquoted href does not match (quoted_attribute_value)",
+	)
+}
+
+// Every directive shape, including the ones no implementation can interpret.
+// Those are dropped: refusing the query would cost the caller every pattern in
+// the file, which is how one stray directive disabled a whole language.
+func TestQueryPropertyDirectiveForms(t *testing.T) {
+	language := getLanguage("javascript")
+	strptr := func(s string) *string { return &s }
+	uintptr := func(i uint) *uint { return &i }
+
+	tests := []struct {
+		name       string
+		predicate  string
+		properties []QueryProperty
+		predicates []PropertyPredicate
+		resolved   []resolvedProperty
+	}{
+		{
+			name:       "capture, key and capture value",
+			predicate:  `(#set! @id url @id)`,
+			properties: []QueryProperty{{Key: "url", CaptureId: uintptr(0), ValueCaptureId: uintptr(0)}},
+			resolved:   []resolvedProperty{{Key: "url", Target: "id", Value: "x"}},
+		},
+		{
+			name:       "capture, key and literal value",
+			predicate:  `(#set! @id key "value")`,
+			properties: []QueryProperty{NewQueryProperty("key", strptr("value"), uintptr(0))},
+		},
+		{
+			name:       "capture and key",
+			predicate:  `(#set! @id key)`,
+			properties: []QueryProperty{NewQueryProperty("key", nil, uintptr(0))},
+		},
+		{
+			name:       "key and literal value, no capture",
+			predicate:  `(#set! key "value")`,
+			properties: []QueryProperty{NewQueryProperty("key", strptr("value"), nil)},
+		},
+		{
+			name:       "key and capture value, no target capture",
+			predicate:  `(#set! url @id)`,
+			properties: []QueryProperty{{Key: "url", ValueCaptureId: uintptr(0)}},
+			resolved:   []resolvedProperty{{Key: "url", Value: "x"}},
+		},
+		{
+			name:       "no arguments at all",
+			predicate:  `(#set!)`,
+			properties: []QueryProperty{},
+		},
+		{
+			name:       "capture with no key to store it under",
+			predicate:  `(#set! @id)`,
+			properties: []QueryProperty{},
+		},
+		{
+			name:       "more arguments than a property can hold",
+			predicate:  `(#set! @id key "value" "extra")`,
+			properties: []QueryProperty{},
+		},
+		{
+			name:       "second capture before any key",
+			predicate:  `(#set! @id @id)`,
+			properties: []QueryProperty{},
+		},
+		{
+			name:       "literal value after a capture value",
+			predicate:  `(#set! url @id "value")`,
+			properties: []QueryProperty{},
+		},
+		{
+			name:       "no key to store the value under",
+			predicate:  `(#set! @id @id "value")`,
+			properties: []QueryProperty{},
+		},
+		{
+			name:       "well-formed property predicate",
+			predicate:  `(#is-not? local)`,
+			properties: []QueryProperty{},
+			predicates: []PropertyPredicate{{NewQueryProperty("local", nil, nil), false}},
+		},
+		{
+			name:       "property predicate with a capture value",
+			predicate:  `(#is? @id url @id)`,
+			properties: []QueryProperty{},
+			predicates: []PropertyPredicate{{QueryProperty{Key: "url", CaptureId: uintptr(0), ValueCaptureId: uintptr(0)}, true}},
+		},
+		{
+			name:       "property predicate with no arguments",
+			predicate:  `(#is-not?)`,
+			properties: []QueryProperty{},
+			predicates: []PropertyPredicate{},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			query, qerr := NewQuery(language, "((identifier) @id "+test.predicate+")")
+			require.Nil(t, qerr)
+			defer query.Close()
+
+			assert.Equal(t, test.properties, query.PropertySettings(0))
+			predicates := test.predicates
+			if predicates == nil {
+				predicates = []PropertyPredicate{}
+			}
+			assert.Equal(t, predicates, query.PropertyPredicates(0))
+
+			expected := test.resolved
+			if expected == nil {
+				expected = []resolvedProperty{}
+			}
+			resolved, matches := resolveProperties(t, language, query, []byte("x"))
+			assert.Equal(t, expected, resolved)
+
+			// A dropped directive must not take the pattern with it.
+			assert.Equal(t, 1, matches)
+		})
+	}
+}
+
+// Predicates that filter matches keep their strict validation: dropping one
+// silently would change which nodes the caller sees, unlike a property.
+func TestQueryStillErrorsOnInvalidFilteringPredicates(t *testing.T) {
+	language := getLanguage("javascript")
+
+	tests := []struct {
+		name      string
+		predicate string
+		message   string
+	}{
+		{
+			name:      "eq with too few arguments",
+			predicate: `(#eq? @id)`,
+			message:   "Wrong number of arguments to #eq? predicate. Expected 2, got 1.",
+		},
+		{
+			name:      "eq with a literal first argument",
+			predicate: `(#eq? "a" "b")`,
+			message:   "First argument to #eq? predicate must be a capture name. Got literal a.",
+		},
+		{
+			name:      "match against a capture",
+			predicate: `(#match? @id @id)`,
+			message:   "Second argument to #match? predicate must be a literal. Got capture @id.",
+		},
+		{
+			name:      "any-of against a capture",
+			predicate: `(#any-of? @id @id)`,
+			message:   "Arguments to #any-of? predicate must be literals. Got capture @id.",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			query, qerr := NewQuery(language, "((identifier) @id "+test.predicate+")")
+			assert.Nil(t, query)
+			require.NotNil(t, qerr)
+			assert.Equal(t, QueryErrorPredicate, qerr.Kind)
+			assert.Equal(t, test.message, qerr.Message)
+		})
+	}
 }
 
 func TestQueryErrorsOnImpossiblePatterns(t *testing.T) {
@@ -5217,6 +5444,60 @@ const foo = [
 	assert.Equal(t, []formattedCapture{{"foo", "3"}}, captures)
 	assert.Equal(t, 1, len(matches))
 	assert.Equal(t, []formattedCapture{{"foo", "3"}}, matches[0].Captures)
+}
+
+type resolvedProperty struct {
+	Key    string
+	Target string
+	Value  string
+}
+
+// resolveProperties resolves the property settings whose value is a capture
+// against every match of query over source, and reports how many matches the
+// query produced so a caller can tell a dropped directive from a dropped
+// pattern.
+func resolveProperties(
+	t *testing.T,
+	language *Language,
+	query *Query,
+	source []byte,
+) ([]resolvedProperty, int) {
+	t.Helper()
+
+	parser := NewParser()
+	defer parser.Close()
+	require.NoError(t, parser.SetLanguage(language))
+
+	tree := parser.Parse(source, nil)
+	require.NotNil(t, tree)
+	defer tree.Close()
+
+	cursor := NewQueryCursor()
+	defer cursor.Close()
+
+	names := query.CaptureNames()
+	resolved := make([]resolvedProperty, 0)
+	count := 0
+	matches := cursor.Matches(query, tree.RootNode(), source)
+	for match, ok := matches.Next(); ok; match, ok = matches.Next() {
+		count++
+		for _, property := range query.PropertySettings(match.PatternIndex) {
+			if property.ValueCaptureId == nil {
+				continue
+			}
+			entry := resolvedProperty{Key: property.Key}
+			for _, capture := range match.Captures {
+				if property.CaptureId != nil && uint(capture.Index) == *property.CaptureId {
+					entry.Target = names[capture.Index]
+				}
+				if uint(capture.Index) == *property.ValueCaptureId {
+					entry.Value = capture.Node.Utf8Text(source)
+				}
+			}
+			resolved = append(resolved, entry)
+		}
+	}
+	return resolved, count
 }
 
 type formattedCapture struct {
